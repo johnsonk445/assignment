@@ -1,0 +1,268 @@
+# Pick a Linux AMI
+---
+- hosts: all
+  become: yes
+  tasks: 
+  - name: Create EC2 instance to setup front-end web server
+  local_action:
+    module: ec2
+    key_name: "{{key_name}}"
+    group: "default"
+    instance_profile_name: "default-profile"
+    instance_type: t2.micro
+    image: "{{ami_id}}"
+    region: "{{aws_region}}"
+    zone: "{{aws_zone}}"
+    wait: yes
+    register: web_base
+  
+ 
+ # Install webserver (Apache)
+  - name: install web server
+    yum: 
+	  name: httpd 
+	  state: installed 
+      httpd_port: 90      
+  
+  
+  # Download code from git
+ - name: install git 
+   yum: name: git state: installed 
+ - name: Clone a private repository into /opt.
+    git:
+      repo: git@github.com:johnny445/maven-project.git
+      version: master
+      dest: /opt/public-repo
+      accept_hostkey: yes
+  # ssh-agent doesn't allow key to pass through remote sudo commands.
+    become: no
+	
+  
+  
+  #Configure webserver with security best practices (List them)
+   
+  - name: Start firewalld
+    service: name=firewalld state=started enabled=yes
+    become: yes
+
+  - name: insert firewalld rule for httpd
+    firewalld: port={{ httpd_port }}/tcp permanent=true state=enabled immediate=yes
+    become: yes
+  - name: create a file index.html
+    file: 
+	  path: /root/index.html
+	  state: touch
+  - name: add content to this file
+    blockinfile:
+      src: index.html
+      path: /var/www/john/index.html
+      block: |
+           hello good morning
+  - name: copy index.html 
+    copy: 
+      src: /root/index.html  
+      dest: /var/www/html/
+  - name: service httpd restart
+    service: 
+      name: httpd 
+      state: restarted
+  # Create a self-signed certificate
+  - name: create etc_httpd_conf.d_status.conf.j2 file
+    file: path=/opt/etc_httpd_conf.d_status.conf.j2 state=touch
+  - name: add content to this file 
+    blockinfile:
+      src: etc_httpd_conf.d_status.conf.j2
+      path: /var/www/etc_httpd_conf.d_status.conf.j2
+      block: |
+              ExtendedStatus {{ httpd_ExtendedStatus }}
+
+             <Location "{{ httpd_StatusLocation }}">
+             SetHandler server-status
+             Require {{ httpd_StatusRequire }}
+             </Location>
+  - name: create httpd.conf.j2
+    file: path=/opt/httpd.conf.j2 state=touch 
+  - name: add content to this file
+    blockinfile:
+      src: httpd.conf.j2
+      path: /var/www/httpd.conf.j2
+      block: |
+              ServerRoot {{ httpd_ServerRoot }}
+              Listen {{ httpd_Listen }}
+              Include conf.modules.d/*.conf
+              User apache
+              Group apache
+              ServerAdmin {{ httpd_ServerAdmin }}
+              {% if httpd_ServerName is defined %}
+               ServerName {{ httpd_ServerName }}
+               {% endif %}
+
+              ServerTokens {{ httpd_ServerTokens }}
+              <Directory />
+              AllowOverride none
+              Require all denied
+              </Directory>
+             DocumentRoot {{ httpd_DocumentRoot }}
+             <Directory "/var/www">
+             AllowOverride None
+             Require all granted
+             </Directory>
+             <Directory "{{ httpd_DocumentRoot }}">
+             Options Indexes FollowSymLinks
+             AllowOverride None
+             Require all granted
+            </Directory>
+            <IfModule dir_module>
+             DirectoryIndex index.html
+            </IfModule>
+            <Files ".ht*">
+             Require all denied
+             </Files>
+             ErrorLog "{{ httpd_ErrorLog }}"
+             LogLevel {{ httpd_LogLevel }}
+             <IfModule log_config_module>
+             LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+             LogFormat "%h %l %u %t \"%r\" %>s %b" common
+            <IfModule logio_module>
+             LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\" %I %O" combinedio
+             </IfModule>
+             CustomLog "{{ httpd_AccessLog }}" combined
+             </IfModule>
+             <IfModule alias_module>
+             ScriptAlias /cgi-bin/ "/var/www/cgi-bin/"
+             </IfModule>
+
+             <Directory "/var/www/cgi-bin">
+             AllowOverride None
+             Options None
+             Require all granted
+             </Directory>
+             <IfModule mime_module>
+              TypesConfig /etc/mime.types
+
+             AddType application/x-compress .Z
+             AddType application/x-gzip .gz .tgz
+             AddType text/html .shtml
+             AddOutputFilter INCLUDES .shtml
+             </IfModule>
+             AddDefaultCharset UTF-8
+             <IfModule mime_magic_module>
+             MIMEMagicFile conf/magic
+             </IfModule>
+             EnableSendfile on
+             IncludeOptional conf.d/*.conf    
+      
+  - name: create ssl.config.j2 file
+    file: path=/opt/ssl.conf.j2 state: touch 
+  - name: add content to this file
+    blockinfile:
+      src: ssl.config.j2
+      path: /var/www/ssl.config.j2
+      block: |
+           
+        Listen {{ httpd_Listen_ssl }} https
+
+        ## SSL Global Context
+        SSLPassPhraseDialog exec:/usr/libexec/httpd-ssl-pass-dialog
+        SSLSessionCache         shmcb:/run/httpd/sslcache(512000)
+        SSLSessionCacheTimeout  300
+        SSLRandomSeed startup file:/dev/urandom  256
+        SSLRandomSeed connect builtin
+        SSLCryptoDevice builtin
+        ## SSL Virtual Host Context
+        <VirtualHost _default_:{{ httpd_Listen_ssl }}>
+
+        ErrorLog {{ httpd_ErrorLog_ssl }}
+        TransferLog {{ httpd_AccessLog }}
+        LogLevel {{ httpd_LogLevel_ssl }}
+
+        SSLEngine on
+        SSLProtocol {{ httpd_SSLProtocol }}
+        SSLCipherSuite {{ httpd_SSLCipherSuite }}
+        SSLHonorCipherOrder {{ httpd_SSLHonorCipherOrder }}
+
+        # Certificate files
+        SSLCertificateFile {{ httpd_SSLCertificateFile }}
+        SSLCertificateKeyFile {{ httpd_SSLCertificateKeyFile }}
+        {% if httpd_SSLCertificateChainFile is defined %}
+        SSLCertificateChainFile {{ httpd_SSLCertificateChainFile }}
+        {% endif %}
+        {% if httpd_SSLCACertificateFile is defined %}
+        SSLCACertificateFile {{ httpd_SSLCACertificateFile }}
+        {% endif %}
+
+        <Files ~ "\.(cgi|shtml|phtml|php3?)$">
+        SSLOptions +StdEnvVars
+        </Files>
+        <Directory "/var/www/cgi-bin">
+        SSLOptions +StdEnvVars
+        </Directory>
+
+         BrowserMatch "MSIE [2-5]" \
+         nokeepalive ssl-unclean-shutdown \
+         downgrade-1.0 force-response-1.0
+
+         CustomLog logs/ssl_request_log \
+          "%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+
+         </VirtualHost>      
+  - name: Creates directory
+    file: path={{ item }} state=directory
+    with_items:
+      - /etc/ssl/crt
+      - /etc/ssl/private
+      - /etc/ssl/csr
+    become: yes
+
+  - name: Create self-signed certificate, if configured.
+    command: >
+      openssl req -x509 -nodes -subj '/CN=localhost' -days 365
+      -newkey rsa:4096 -sha256 -keyout /etc/ssl/private/localhost.key -out /etc/ssl/csr/localhost.csr
+      creates=/etc/ssl/crt/localhost.crt
+    become: yes
+
+	   
+  # Secure a demo site using self-signed certificate
+  - name: Install main configuration file
+    template:
+      src: httpd.conf.j2
+      dest: "{{ httpd_config }}"
+      owner: root
+      group: root
+      setype: httpd_config_t
+      mode: '0644'
+    notify: restart httpd
+    become: yes
+
+  - name: Install status configuration file
+    template:
+      src: etc_httpd_conf.d_status.conf.j2
+      dest: "{{ httpd_status_config }}"
+      owner: root
+      group: root
+      setype: httpd_config_t
+      mode: '0644'
+    notify: restart httpd
+    when: httpd_StatusEnable
+    become: yes
+
+  - name: Install mod_ssl configuration file
+    template:
+      src: ssl.conf.j2
+      dest: "{{ httpd_ssl_config }}"
+      owner: root
+      group: root
+      setype: httpd_config_t
+      mode: '0644'
+    notify: restart httpd
+    become: yes
+  - name: restart firewalld
+    service: name=firewalld state=restarted
+    become: yes
+
+  - name: restart httpd
+    service: name=httpd state=restarted
+    become: yes
+		
+		
+  

@@ -1,0 +1,323 @@
+1. Cloud formation script to create below AWS components
+Parameters:
+  # First, a VPC:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:  !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+ # Our VPC will need internet access:     
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    # Notice how you can't attach an IGW to a VPC unless both are created:
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway		
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.10.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list       
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-A
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.20.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the second AZ in the list 
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-B
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.50.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list 
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private-A
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.60.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the second AZ in the list 
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Private-B
+  # Some route tables for our subnets:
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Public
+  PublicRoute1:   # Public route table has direct routing to IGW:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway 
+   # Here is a private route table:
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Private
+  PrivateRoute1:            # Private route table can access web via NAT (created below)
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      # Route traffic through the NAT Gateway:
+      NatGatewayId: ???
+   # A NAT Gateway:
+  NATGateway:
+   Type: AWS::EC2::NatGateway
+   Properties:
+     AllocationId: !GetAtt ElasticIPAddress.AllocationId
+     SubnetId: !Ref PublicSubnetA
+     Tags:
+     - Key: Name
+       Value: !Sub NAT-${AWS::StackName}
+  ElasticIPAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC 
+  PrivateRoute1:            # Private route table can access web via NAT (created below)
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      # Route traffic through the NAT Gateway:
+      NatGatewayId: !Ref NATGateway
+  # Attach the public subnets to public route tables,
+  # and attach the private subnets to private route tables:   
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation  
+    Properties:
+      SubnetId: !Ref PublicSubnetA  
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+  PublicNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    DependsOn: VPC
+    Properties:
+      VpcId: !Ref VPC    
+  # Security Group to allow port 80 and 443
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+  Properties:
+    GroupName: "Internet Group"
+    GroupDescription: "HTTP and HTTPS traffic in, all traffic out."
+    VpcId: !Ref VPC
+    SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+	  - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0	
+    SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0  
+ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn:
+          Ref: ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+      - Ref: PublicSubnetA
+      - Ref: PublicSubnetB
+      SecurityGroups:
+      - !Ref SecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthCheckPath: /
+      Name: MyTargetGroup
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Ref: VPC
+
+  DNS:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: My private hosted zone for example.com
+      Name: example.net.
+      VPCs:
+        -
+         VPCId: !Ref VPC
+         VPCRegion: ap-southeast-1
+
+  DNSRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref DNS
+      Comment: Zone apex alias targeted to Application Load Balancer.
+      Name: www.example.net.
+      Type: CNAME
+      AliasTarget:
+        HostedZoneId: Z1LMS91P8CMLE5
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref S3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: !Ref S3BucketAccessControl
+
+  IAMNewRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+             - sts:AssumeRole
+      Path: "/"
+      Policies:
+        -
+          PolicyName: MyPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                - 'autoscaling:Describe*'
+                - 'cloudformation:Describe*'
+                - 'cloudformation:List*'
+                - 'autoscaling:*'
+                - 'ec2:Describe*'
+                - 'elasticloadbalancing:Describe*'
+                - 'route53:List*'
+                - 'route53:Get*'
+                - 's3:List*'
+                - 's3:Get*'
+                - 's3:PutObject'
+                - 'rds:Describe*'
+                - 'rds:List*'
+                - 'codedeploy:*'
+
+                Resource: '*'
+
+  IAMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        -
+         Ref: IAMNewRole
+
+Outputs:
+  VPC:
+    Description: Created VPC
+    Value: !Ref VPC
+  InternetGateway:
+    Description: Created InternetGateway
+    Value: !Ref InternetGateway
+  VPCGatewayAttachment:
+    Description: Gateway for Internet for this VPC
+    Value: !Ref VPCGatewayAttachment
+  PublicRouteTable:
+    Description: Public Route Table Created for VPC
+    Value: !Ref PublicRouteTable
+  PrivateRouteTable:
+    Description: Private Route Table Created for VPC
+    Value: !Ref PrivateRouteTable
+  PublicNetworkAcl:
+    Description: Public Network ACL Created for VPC
+    Value: !Ref PublicNetworkAcl
+  PrivateNetworkAcl:
+    Description: Private Netowrk ACL Created for VPC
+    Value: !Ref PrivateNetworkAcl
+  PublicSubnetA:
+    Description: Public Subnet A Created for VPC
+    Value: !Ref PublicSubnetA
+  PublicSubnetB:
+    Description: Public Subnet B Created for VPC
+    Value: !Ref PublicSubnetB
+  PrivateSubnetA:
+    Description: Private Subnet A Created for VPC
+    Value: !Ref PrivateSubnetA
+  PrivateSubnetB:
+    Description: Private Subnet B Created for VPC
+    Value: !Ref PrivateSubnetB
+  NatGateway:
+    Description: Nat Gateway
+    Value: !Ref NatGateway
+  SecurityGroup:
+    Description: Security Group to allow ports 80 and 443
+    Value: !Ref SecurityGroup
+  ApplicationLoadBalancer:
+    Description: Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+  S3Bucket:
+    Description: S3 Bucket
+    Value: !Ref S3Bucket
+  Route53DNS:
+    Description: Hosted Zone
+    Value: !Ref DNS
+  DNSRecordSet:
+    Description: CNAME entry for ELB/ALB
+    Value: !Ref DNSRecordSet
+  IAMInstanceProfile:
+    Description: IAM Instance Profile
+    Value: !Ref IAMInstanceProfile
+  IAMRole:
+    Description: IAM Role
+    Value: !Ref IAMNewRole
